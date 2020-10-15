@@ -1,0 +1,108 @@
+========================================================================================================================
+Part 1: Summarise and describe our trading
+========================================================================================================================
+
+Note that I have absolutely no experience with betting/finance! My approach to understand this was to parse and
+inspect the trading log, and then try to theorize some possible strategies to see how well they line up with the
+output of the log. Note that I will not focus too much on code optimization, as the task seems to be more about
+understanding data. From simply examining the JSON file, we can see:
+
+    --> We are performing fairly high-frequency betting, based upon current state of the market by regularly polling the
+        Betfair API at regular (~0.25s) intervals.
+    --> We only perform pre-match betting rather than in-play ('inPlay' = false, timestamps end at race start time of 14:00)
+    --> This log looks at two markets (place, i.e. numberOfWinners = 3, and win, i.e. numberOfWinners = 1) for one race
+    --> Pre-race information is available for each rider, including forecasted fractional odds
+
+I firstly look to extract useful information into a slightly nicer format:
+
+    {
+        <marketId>: {
+            'description': <market_description>,
+            'forecast': <forecasted_odds>,
+            'info': [<chronological_log_history_items>]
+        }
+    }
+
+I then theorize and test some simple strategies which could work. The following documents my thought process throughout.
+
+Firstly, I try to understand what information is available. From simply inspecting the JSON, we have:
+
+    --> Timestamped offers on the exchange per rider, both LAY and BACK ('availableToLay' and 'availableToBack').
+    --> Forecasted odds (which we extract into 'forecast' by converting 'FORECASTPRICE_NUMERATOR' +
+        'FORECASTPRICE_DENOMINATOR' in the description field to decimal odds per rider)
+    --> Latest traded price per rider in each of the two markets ('lastPriceTraded')
+    --> Three horses are not running, meaning usually an adjustment factor would need to be applied. However, in our
+        case the removed horses have negligible impact on the odds due to poor forecasted results.
+    --> We only place bets on the 'Win' market (id 1.170226122), so we should be able to ignore the place market
+    --> Bets are only placed on certain horses, with others being left out
+
+Other information seems to be negligible, so we assume this is what we have to work with. I plan to test these theories
+in order (from easiest to test to most complex. If a theory holds, I won't test ones after for sake of time):
+
+    1. Betting if odds are better than forecasted
+    2. Odds are predetermined, rather than based on log data. Only bets under an unknown price threshold are taken
+    3. Betting if we can get a better price than the last price traded at
+
+1. To see if we only bet on odds better than those forecasted in the win market, we simply compare the price of orders
+   placed versus the forecasted odds we have extracted. We test this using 'test_odds_better_than_forecasted()', and
+   find that this theory does not hold up at all (only holds for 124/318 BACKs, 130/459 LAYs).
+
+2. An alternative strategy would be betting on predetermined odds; i.e. if prices are better than a predetermined
+   threshold, we make a bet. To test this, we firstly find the minimum back price and maximum lay price taken per rider
+   ('get_order_limits()'), and use these figures as our "thresholds".
+   We find by counting the number of times opportunities arise where we can get a better price than our thresholds
+   (using 'test_threshold_betting()'), and by comparing this to the total number of bets made, that these numbers do not
+   at all line up: 24,485 opportunities were found where we could get a better price than our "threshold", but only 777
+   bets were made in total. We can therefore rule this out as a strategy, and can conclude from this that the algorithm
+   takes the current state of the market into account to make decisions.
+
+3. We perform a similar test to see if orders are placed if they beat the price of the last order placed. This test is
+   slightly different, as we need to keep track of the last price as orders are made. We therefore extract order data,
+   obtaining the order information along with the market state when the order was made; done in 'extract_orders_data()'.
+   This is done in 'test_odds_better_than_previous()'; we fnd that this theory holds up very nicely, with 95% (303/318)
+   of BACK bets following this pattern, and 95% (24/459) of LAY bets following it.
+
+   We also note that the majority of times this pattern does not match is a few seconds before betting closes, and on a
+   particular horse (Satin Sun, id 28095568, accounts for 14 counts of theory not holding). The price for bets on this
+   horse also fluctuate heavily during these few seconds (between 38 and 46); this volatility, along with a likely high
+   trade volume right before betting closes could indicate that our 'lastPriceTraded' variable may be inaccurate, and
+   could mean we need a higher polling frequency. Alternatively, our algorithm could be using a different measure to
+   make bets, which highly correlates with beating the 'lastPriceTraded'; for example, only taking trades which are
+   a certain amount below the average market price, or those which are considered "good" relative to the market by some
+   model.
+
+
+I will stop there due to time; it is likely a more complex system is in place which would take some analysis to figure
+out. I would approach this by looking at correlations between when bets are made and different market features.
+
+TL;DR: The system makes high-frequency, pre-race trades. It seems to consider only certain horses on the win market
+(although odds on these horses may just be "good" in the model's opinion), and make bets on these horses only if we can
+get a price which is (95% of the time) better than the last price traded. Other features may also be considered by the
+system, such as market volatility (as seen in times where our theory doesn't line up), or other market features. The
+system definitely looks at current market state, and doesn't just go off of forecast odds or self-determined odds due to
+fluctuations in the "tolerance" for certain odds.
+
+
+========================================================================================================================
+Part 2: Evaluate how good our trading is
+========================================================================================================================
+
+To evaluate quality of trading, we can simply work out profit. By looking up the race results, we can see that
+Farmix (id 27157433) wins the race; backs on Fairmix pay out, along with lays on any other horse. Conversely of course,
+LAYs on Fairmix are losing, along with BACKs on other horses.
+
+We calculate our profit in 'get_profit', and find we make £1501.51, from a total staked of £6473.41. I don't know much
+about betting, but a profit of 23% from betting for a few minutes seems pretty good to me!
+
+We could also look at the expected profit per trade, £1.90.
+
+========================================================================================================================
+Part 3: Outline a plan for improving our execution
+========================================================================================================================
+
+As I have barely any experience with finance/betting, and haven't managed to find the system's exact mechanism, its hard
+to outline improvements. Some simple ones could include:
+
+    --> Higher API polling frequency
+    --> Better modelling of odds
+    --> In-play betting- seems like more opportunities there
